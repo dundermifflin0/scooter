@@ -17,6 +17,7 @@
 package com.hazelcast.jet.accumulator;
 
 import java.util.Objects;
+import java.util.function.Supplier;
 
 /**
  * Mutable container of an object reference.
@@ -44,6 +45,13 @@ public class MutableReference<T> {
      * Returns the current value.
      */
     public T get() {
+        return value;
+    }
+
+    public T createIfAbsent(Supplier<T> supplier) {
+        if (value == null) {
+            value = supplier.get();
+        }
         return value;
     }
 

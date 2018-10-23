@@ -45,6 +45,7 @@ import com.hazelcast.jet.impl.operation.StartExecutionOperation;
 import com.hazelcast.jet.impl.operation.SubmitJobOperation;
 import com.hazelcast.jet.impl.operation.TerminateExecutionOperation;
 import com.hazelcast.jet.impl.operation.TerminateJobOperation;
+import com.hazelcast.jet.impl.processor.SessionWindowHandler;
 import com.hazelcast.jet.impl.processor.SessionWindowP;
 import com.hazelcast.jet.impl.processor.SlidingWindowP.SnapshotKey;
 import com.hazelcast.jet.impl.util.AsyncSnapshotWriterImpl;
@@ -90,6 +91,7 @@ public final class JetInitDataSerializerHook implements DataSerializerHook {
     public static final int GET_JOB_SUMMARY_LIST_OP = 32;
     public static final int JOB_SUMMARY = 33;
     public static final int SNAPSHOT_STATS = 34;
+    public static final int SESSION_WINDOW_H_WINDOWS = 35;
 
     public static final int FACTORY_ID = FactoryIdHelper.getFactoryId(JET_IMPL_DS_FACTORY, JET_IMPL_DS_FACTORY_ID);
 
@@ -177,6 +179,8 @@ public final class JetInitDataSerializerHook implements DataSerializerHook {
                     return new GetJobSummaryListOperation();
                 case SNAPSHOT_STATS:
                     return new SnapshotStats();
+                case SESSION_WINDOW_H_WINDOWS:
+                    return new SessionWindowHandler.Windows<>();
                 default:
                     throw new IllegalArgumentException("Unknown type id " + typeId);
             }
