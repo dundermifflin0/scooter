@@ -48,7 +48,7 @@ public class CustomWindowP<T, K, S, R> extends AbstractProcessor {
     @Nonnull
     private final List<Function<Object, K>> keyFns;
 
-    private final Map<K, S> states = new HashMap<>();
+    final Map<K, S> states = new HashMap<>();
     private Traverser<R> traverser = Traversers.empty();
     private final MutableReference<S> stateRef = new MutableReference<>();
     private long currentWatermark = Long.MIN_VALUE;

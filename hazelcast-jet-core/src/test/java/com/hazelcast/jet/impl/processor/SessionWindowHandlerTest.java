@@ -47,32 +47,37 @@ import static java.util.Collections.shuffle;
 import static java.util.Collections.singletonList;
 import static java.util.concurrent.TimeUnit.SECONDS;
 import static java.util.stream.Collectors.toList;
+import static org.junit.Assert.assertTrue;
 
 @RunWith(HazelcastParallelClassRunner.class)
 public class SessionWindowHandlerTest {
 
     private static final int SESSION_TIMEOUT = 10;
     private DistributedSupplier<Processor> supplier;
-    private SessionWindowP<String, ?, Long, WindowResult<String, Long>> lastSuppliedProcessor;
+    private CustomWindowP lastSuppliedProcessor;
+    private SessionWindowHandler lastSuppliedHandler;
 
     @Before
     public void before() {
-        supplier = () -> new CustomWindowP<>(
-                new SessionWindowHandler<>(
-                        SESSION_TIMEOUT,
-                        AggregateOperations.counting(),
-                        WindowResult::new
-                ),
-                singletonList((DistributedToLongFunction<Entry<Object, Long>>) Entry::getValue),
-                singletonList(entryKey())
-        );
+        supplier = () -> {
+            lastSuppliedHandler = new SessionWindowHandler<>(
+                    SESSION_TIMEOUT,
+                    AggregateOperations.counting(),
+                    WindowResult::new
+            );
+            return lastSuppliedProcessor = new CustomWindowP<>(
+                    lastSuppliedHandler,
+                    singletonList((DistributedToLongFunction<Entry<Object, Long>>) Entry::getValue),
+                    singletonList(entryKey())
+            );
+        };
     }
 
     @After
     public void after() {
         // Check against memory leaks
-//        assertTrue("keyToWindows not empty", lastSuppliedProcessor.keyToWindows.isEmpty());
-//        assertTrue("deadlineToKeys not empty", lastSuppliedProcessor.deadlineToKeys.isEmpty());
+        assertTrue("keyToWindows not empty", lastSuppliedProcessor.states.isEmpty());
+        assertTrue("deadlineToKeys not empty", lastSuppliedHandler.deadlineToKeys.isEmpty());
     }
 
     @Test
@@ -159,7 +164,7 @@ public class SessionWindowHandlerTest {
         }
     }
 
-    public static void main(String[] args) {
+    public static void main(String[] args) throws Exception {
         for (int i = 0; i < 10; i++) {
             SessionWindowHandlerTest test = new SessionWindowHandlerTest();
             test.before();
@@ -168,7 +173,7 @@ public class SessionWindowHandlerTest {
     }
 
     @SuppressWarnings("checkstyle:emptystatement")
-    private void runBench() {
+    private void runBench() throws Exception {
         Random rnd = ThreadLocalRandom.current();
         long start = System.nanoTime();
         long eventCount = 40_000_000;

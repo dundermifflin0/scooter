@@ -57,7 +57,7 @@ import static java.util.stream.Collectors.toList;
 
 public class SessionWindowHandler<T, K, A, R, OUT> implements CustomWindowHandler<T, K, Windows<A>, OUT> {
 
-    private final SortedMap<Long, Set<K>> deadlineToKeys = new TreeMap<>();
+    final SortedMap<Long, Set<K>> deadlineToKeys = new TreeMap<>();
     private final long sessionTimeout;
     @Nonnull
     private final AggregateOperation<A, R> aggrOp;
