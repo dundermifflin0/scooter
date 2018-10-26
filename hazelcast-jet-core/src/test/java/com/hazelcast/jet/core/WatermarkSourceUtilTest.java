@@ -19,6 +19,7 @@ package com.hazelcast.jet.core;
 import com.hazelcast.jet.Traverser;
 import org.junit.Test;
 
+import static com.hazelcast.jet.core.TestUtil.wm;
 import static com.hazelcast.jet.core.WatermarkEmissionPolicy.noThrottling;
 import static com.hazelcast.jet.core.EventTimePolicy.eventTimePolicy;
 import static com.hazelcast.jet.core.WatermarkPolicies.limitingLag;
@@ -130,9 +131,5 @@ public class WatermarkSourceUtilTest {
 
     private long ns(long ms) {
         return MILLISECONDS.toNanos(ms);
-    }
-
-    public Watermark wm(long time) {
-        return new Watermark(time);
     }
 }

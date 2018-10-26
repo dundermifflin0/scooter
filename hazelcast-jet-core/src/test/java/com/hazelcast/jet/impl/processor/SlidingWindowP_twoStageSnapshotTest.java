@@ -23,7 +23,6 @@ import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.SlidingWindowPolicy;
 import com.hazelcast.jet.core.TimestampKind;
-import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.core.processor.Processors;
 import com.hazelcast.jet.core.test.TestInbox;
 import com.hazelcast.jet.core.test.TestOutbox;
@@ -47,6 +46,7 @@ import java.util.stream.Collectors;
 
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.core.SlidingWindowPolicy.slidingWinPolicy;
+import static com.hazelcast.jet.core.TestUtil.wm;
 import static com.hazelcast.jet.core.processor.Processors.combineToSlidingWindowP;
 import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
@@ -193,10 +193,6 @@ public class SlidingWindowP_twoStageSnapshotTest {
                 p.tsToKeyToAcc.isEmpty());
         assertTrue("slidingWindow is not empty: " + p.slidingWindow,
                 p.slidingWindow == null || p.slidingWindow.isEmpty());
-    }
-
-    private static Watermark wm(long timestamp) {
-        return new Watermark(timestamp);
     }
 
     private static TimestampedEntry<Long, ?> outboxFrame(long ts, long value) {

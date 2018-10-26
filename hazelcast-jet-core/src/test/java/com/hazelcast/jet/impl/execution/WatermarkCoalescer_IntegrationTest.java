@@ -45,6 +45,7 @@ import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.core.Edge.between;
 import static com.hazelcast.jet.core.Edge.from;
 import static com.hazelcast.jet.core.ProcessorMetaSupplier.preferLocalParallelismOne;
+import static com.hazelcast.jet.core.TestUtil.wm;
 import static com.hazelcast.jet.core.processor.SinkProcessors.writeListP;
 import static com.hazelcast.jet.impl.execution.WatermarkCoalescer.IDLE_MESSAGE;
 import static java.util.Arrays.asList;
@@ -258,10 +259,6 @@ public class WatermarkCoalescer_IntegrationTest extends JetTestSupport {
         assertTrueEventually(() -> assertEquals(2, sinkList.size()));
         assertEquals("wm(100)", sinkList.get(0));
         assertEquals("wm(101)", sinkList.get(1));
-    }
-
-    private Watermark wm(long ts) {
-        return new Watermark(ts);
     }
 
     private ListSource.Delay delay(long ms) {

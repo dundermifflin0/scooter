@@ -49,6 +49,7 @@ import java.util.stream.LongStream;
 
 import static com.hazelcast.jet.Util.entry;
 import static com.hazelcast.jet.core.SlidingWindowPolicy.slidingWinPolicy;
+import static com.hazelcast.jet.core.TestUtil.wm;
 import static com.hazelcast.jet.core.processor.Processors.aggregateToSlidingWindowP;
 import static com.hazelcast.jet.core.processor.Processors.combineToSlidingWindowP;
 import static com.hazelcast.jet.core.test.TestSupport.verifyProcessor;
@@ -318,9 +319,5 @@ public class SlidingWindowPTest {
 
     private static TimestampedEntry<Long, ?> outboxFrame(long ts, long value) {
         return new TimestampedEntry<>(ts, KEY, value);
-    }
-
-    private static Watermark wm(long timestamp) {
-        return new Watermark(timestamp);
     }
 }

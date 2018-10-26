@@ -41,6 +41,7 @@ import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 
 import static com.hazelcast.jet.core.SlidingWindowPolicy.tumblingWinPolicy;
+import static com.hazelcast.jet.core.TestUtil.wm;
 import static com.hazelcast.jet.core.WatermarkEmissionPolicy.emitByFrame;
 import static com.hazelcast.jet.core.WatermarkEmissionPolicy.emitByMinStep;
 import static com.hazelcast.jet.core.WatermarkEmissionPolicy.noThrottling;
@@ -367,10 +368,6 @@ public class InsertWatermarksPTest {
 
     private static Item item(long timestamp) {
         return new Item(timestamp);
-    }
-
-    private static Watermark wm(long timestamp) {
-        return new Watermark(timestamp);
     }
 
     private static Tick tick(long timestamp) {

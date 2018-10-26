@@ -82,4 +82,8 @@ public final class TestUtil {
     public static <T> Set<T> set(T ... foo) {
         return new HashSet<>(asList(foo));
     }
+
+    public static Watermark wm(long timestamp) {
+        return new Watermark(timestamp);
+    }
 }
