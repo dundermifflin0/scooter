@@ -24,6 +24,7 @@ import java.util.Enumeration;
 import java.util.Iterator;
 import java.util.Spliterator;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
 
@@ -51,8 +52,35 @@ public final class Traversers {
      * and return it.
      */
     @Nonnull
-    public static <T> Traverser<T> traverseIterator(@Nonnull Iterator<? extends T> iterator) {
-        return () -> iterator.hasNext() ? ensureNotNull(iterator.next(), "Iterator returned a null item") : null;
+    public static <T> IteratorTraverser<T> traverseIterator(@Nonnull Iterator<? extends T> iterator) {
+        return new IteratorTraverser<>(iterator, e -> false);
+    }
+
+    public static class IteratorTraverser<T> implements Traverser<T> {
+        private final Iterator<? extends T> iterator;
+        private final Predicate<? super T> predicate;
+
+        private IteratorTraverser(Iterator<? extends T> iterator, Predicate<? super T> predicate) {
+            this.iterator = iterator;
+            this.predicate = predicate;
+        }
+
+        @Override
+        public T next() {
+            if (iterator.hasNext()) {
+                T item = ensureNotNull(iterator.next(), "Iterator returned a null item");
+                if (predicate.test(item)) {
+                    iterator.remove();
+                }
+                return item;
+            } else {
+                return null;
+            }
+        }
+
+        public IteratorTraverser<T> removeIf(Predicate<? super T> predicate) {
+            return new IteratorTraverser<>(iterator, predicate);
+        }
     }
 
     /**
@@ -120,7 +148,7 @@ public final class Traversers {
      * immediately.
      */
     @Nonnull
-    public static <T> Traverser<T> traverseIterable(@Nonnull Iterable<? extends T> iterable) {
+    public static <T> IteratorTraverser<T> traverseIterable(@Nonnull Iterable<? extends T> iterable) {
         return traverseIterator(iterable.iterator());
     }
 

@@ -16,62 +16,103 @@
 
 package com.hazelcast.jet.impl.processor.customwindow;
 
+import com.hazelcast.internal.metrics.Probe;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.Traversers;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.core.AbstractProcessor;
-import com.hazelcast.jet.function.DistributedFunction;
-import com.hazelcast.jet.impl.processor.customwindow.CustomWindowHandler.HandlerContext;
-import com.hazelcast.jet.impl.processor.customwindow.CustomWindowHandler.Window;
+import com.hazelcast.jet.core.Watermark;
+import com.hazelcast.jet.function.KeyedWindowResultFunction;
 
 import javax.annotation.Nonnull;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Function;
+import java.util.function.ToLongFunction;
 
-class CustomWindowP<T, K, S, A, R> extends AbstractProcessor {
-    private final CustomWindowHandler<T, K, A> handler;
+import static com.hazelcast.jet.Traversers.traverseIterable;
+import static com.hazelcast.jet.impl.processor.customwindow.CustomWindowHandler.NO_ACTION;
+import static com.hazelcast.jet.impl.processor.customwindow.CustomWindowHandler.isFire;
+import static com.hazelcast.jet.impl.processor.customwindow.CustomWindowHandler.isPurge;
+import static com.hazelcast.jet.impl.util.Util.lazyIncrement;
+import static com.hazelcast.jet.impl.util.Util.logLateEvent;
+
+class CustomWindowP<T, K, A, R, S, OUT> extends AbstractProcessor {
+    private final CustomWindowHandler<T, A, S> handler;
+    private final List<ToLongFunction<Object>> timestampFns;
+    private final List<Function<Object, K>> keyFns;
     private final AggregateOperation1<T, A, R> aggrOp;
-    private final DistributedFunction<T, K> extractKeyF;
-    private final Map<K, KeyState<S, A>> states = new HashMap<>();
-    private KeyState<S, A> currentState;
-    private final Traverser<R> traverser = Traversers.empty();
-    private HandlerContext handlerContext = () -> currentWatermark;
-    private T currentItem;
+    private final KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn;
 
-    public CustomWindowP(CustomWindowHandler<T, K, A> handler, AggregateOperation1<T, A, R> aggrOp,
-                         DistributedFunction<T, K> extractKeyF) {
+    private Traverser<OUT> traverser = Traversers.empty();
+    private long currentWatermark = Long.MIN_VALUE;
+
+    private final Map<K, WindowSet<T, A, S>> state = new HashMap<>();
+
+    @Probe
+    private AtomicLong lateEventsDropped = new AtomicLong();
+
+    private final FlatMapper watermarkFlatMapper = flatMapper(this::watermarkToTraverser);
+
+    public CustomWindowP(
+            CustomWindowHandler<T, A, S> handler,
+            List<ToLongFunction<Object>> timestampFns,
+            List<Function<Object, K>> keyFns,
+            AggregateOperation1<T, A, R> aggrOp,
+            @Nonnull KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn
+    ) {
         this.handler = handler;
+        this.timestampFns = timestampFns;
+        this.keyFns = keyFns;
         this.aggrOp = aggrOp;
-        this.extractKeyF = extractKeyF;
+        this.mapToOutputFn = mapToOutputFn;
     }
 
     @Override
-    protected boolean tryProcess(int ordinal, @Nonnull Object item) throws Exception {
+    protected boolean tryProcess(int ordinal, @Nonnull Object item) {
         if (!emitFromTraverser(traverser)) {
             return false;
         }
-        outputList.clear();
-        currentItem = (T) item;
-        K key = extractKeyF.apply(currentItem);
-        currentState = states.computeIfAbsent(key, k -> new KeyState<>(handler.createState()));
-        handler.onItem(currentItem, , currentState.handlerState, handlerContext);
+        @SuppressWarnings("unchecked")
+        final long timestamp = timestampFns.get(ordinal).applyAsLong(item);
+        K key = keyFns.get(ordinal).apply(item);
+        if (timestamp < currentWatermark) {
+            logLateEvent(getLogger(), currentWatermark, item);
+            lazyIncrement(lateEventsDropped);
+            return true;
+        }
+        T castedItem = (T) item;
+
+        WindowSet<T, A, S> windowSet = state.computeIfAbsent(key, k -> new OverlappingWindowSet<>(aggrOp));
+        handler.onItem(castedItem, timestamp, windowSet);
+        traverser = traverseIterable(windowSet)
+                .removeIf(e -> isPurge(e.getValue().action))
+                .filter(e -> {
+                    boolean fire = isFire(e.getValue().action);
+                    e.getValue().action = NO_ACTION;
+                    return fire;
+                })
+                .map(e -> mapToOutputFn.apply(e.getKey().start, e.getKey().end, key,
+                        ((Function<A, R>) (isPurge(e.getValue().action) ? aggrOp.finishFn() : aggrOp.exportFn()))
+                                .apply(e.getValue().accumulator)));
+
         return emitFromTraverser(traverser);
     }
 
-    private void addToWindowCallback(long start, long end, boolean emitNow) {
-        A acc = currentState.windowSet.computeIfAbsent(new Window(start, end), k -> aggrOp.createFn().get());
-        aggrOp.accumulateFn().accept(acc, currentItem);
-        if (emitNow) {
-            outputList.add(aggrOp.exportFn().apply(acc));
-        }
+    @Override
+    public boolean tryProcessWatermark(@Nonnull Watermark wm) {
+        return watermarkFlatMapper.tryProcess(wm);
     }
 
-    private static class KeyState<S, A> {
-        final S handlerState;
-        final Map<Window, A> windowSet = new HashMap<>();
-
-        public KeyState(S handlerState) {
-            this.handlerState = handlerState;
-        }
+    private Traverser<OUT> watermarkToTraverser(Watermark wm) {
+        return traverseIterable(state.entrySet())
+                .flatMap(entry -> traverseIterable(entry.getValue())
+                        .filter(wsEntry -> !isFire(handler.onWatermark(wm.timestamp(), wsEntry.getKey().start, wsEntry.getKey().end,
+                                wsEntry.getValue().handlerState)))
+                        .map(wsEntry -> mapToOutputFn.apply(wsEntry.getKey().start, wsEntry.getKey().end, entry.getKey(),
+                                aggrOp.exportFn().apply(wsEntry.getValue().accumulator)))
+                );
     }
 }

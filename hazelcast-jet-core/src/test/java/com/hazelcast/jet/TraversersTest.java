@@ -34,6 +34,7 @@ import static com.hazelcast.jet.Traversers.traverseIterator;
 import static com.hazelcast.jet.Traversers.traverseSpliterator;
 import static com.hazelcast.jet.Traversers.traverseStream;
 import static java.util.Arrays.asList;
+import static java.util.Collections.emptyList;
 import static java.util.stream.Stream.of;
 import static junit.framework.TestCase.assertTrue;
 import static junit.framework.TestCase.fail;
@@ -180,5 +181,42 @@ public class TraversersTest {
         assertNull(t.next());
 
         assertEquals(Arrays.asList(1, 2, 3), list);
+    }
+
+    @Test
+    public void test_iteratorWithRemove_beginning() {
+        test_iteratorWithRemove(asList(1, 2, 3), asList(2, 3));
+    }
+
+    @Test
+    public void test_iteratorWithRemove_middle() {
+        test_iteratorWithRemove(asList(1, 2, 3), asList(1, 3));
+    }
+
+    @Test
+    public void test_iteratorWithRemove_end() {
+        test_iteratorWithRemove(asList(1, 2, 3), asList(1, 2));
+    }
+
+    @Test
+    public void test_iteratorWithRemove_removeNone() {
+        test_iteratorWithRemove(asList(1, 2, 3), emptyList());
+    }
+
+    @Test
+    public void test_iteratorWithRemove_removeAll() {
+        test_iteratorWithRemove(asList(1, 2, 3), asList(1, 2, 3));
+    }
+
+    private void test_iteratorWithRemove(List<Integer> allItems, List<Integer> retainedItems) {
+        ArrayList<Integer> items = new ArrayList<>(allItems);
+        Traverser<Integer> t = traverseIterable(items)
+                .removeIf(item -> !retainedItems.contains(item));
+
+        for (Integer item : allItems) {
+            assertEquals(item, t.next());
+        }
+        assertNull(t.next());
+        assertEquals(retainedItems, items);
     }
 }

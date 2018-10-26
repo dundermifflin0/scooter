@@ -17,19 +17,26 @@
 package com.hazelcast.jet.impl.processor.customwindow;
 
 import javax.annotation.Nonnull;
-import java.util.Map;
 
-public interface CustomWindowHandler<T, K, A> {
+public interface CustomWindowHandler<T, A, S> {
 
-    void onItem(@Nonnull T item, long timestamp, @Nonnull WindowSet<A> windows, @Nonnull HandlerContext handlerContext);
+    int NO_ACTION = 0;
+    int FIRE = 1;
+    int PURGE = 2;
+    int FIRE_AND_PURGE = 3;
 
-    boolean onWatermark(long watermarkTime, long windowStart, long windowEnd, A accumulator, @Nonnull HandlerContext handlerContext);
+    void onItem(@Nonnull T item, long timestamp, @Nonnull WindowSet<T, A, S> windows);
 
-    default void onTryProcess(@Nonnull Map<K, WindowSet<A>> state, @Nonnull HandlerContext handlerContext) {
+    int onWatermark(long watermarkTime, long windowStart, long windowEnd, S state);
+
+//    default void onTryProcess(@Nonnull Map<K, WindowSet<A>> state) {
+//    }
+
+    static boolean isFire(int action) {
+        return (action & FIRE) != 0;
     }
 
-    interface HandlerContext {
-        long currentWatermark();
+    static boolean isPurge(int action) {
+        return (action & PURGE) != 0;
     }
 }
-

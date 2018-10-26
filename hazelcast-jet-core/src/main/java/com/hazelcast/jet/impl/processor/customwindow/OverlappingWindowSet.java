@@ -17,66 +17,43 @@
 package com.hazelcast.jet.impl.processor.customwindow;
 
 import com.hazelcast.jet.JetException;
+import com.hazelcast.jet.aggregate.AggregateOperation1;
 
+import javax.annotation.Nonnull;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.Map;
-import java.util.Objects;
+import java.util.Map.Entry;
 import java.util.function.Supplier;
 
-public class OverlappingWindowSet<T> implements WindowSet<T> {
+class OverlappingWindowSet<T, A, S> implements WindowSet<T, A, S> {
 
-    private final Map<TwoLongs, Value<T>> data = new HashMap<>();
+    private final AggregateOperation1 aggrOp;
+    private final Map<TwoLongs, Value<A, S>> data = new HashMap<>();
 
-    @Override
-    public T getOrCreate(long start, long end, Supplier<T> createFn) {
-        return data.computeIfAbsent(new TwoLongs(start, end), k -> new Value(createFn.get())).value;
+    OverlappingWindowSet(AggregateOperation1<T, A, ?> aggrOp) {
+        this.aggrOp = aggrOp;
     }
 
     @Override
-    public void mark(long start, long end, boolean fire, boolean purge) {
-        Value<T> v = data.get(new TwoLongs(start, end));
+    public S accumulate(T item, long start, long end, Supplier<S> state) {
+        Value<A, S> value =
+                data.computeIfAbsent(new TwoLongs(start, end), k -> new Value(aggrOp.createFn().get(), state.get()));
+        aggrOp.accumulateFn().accept(value.accumulator, item);
+        return value.handlerState;
+    }
+
+    @Override
+    public void mark(long start, long end, int action) {
+        Value<A, S> v = data.get(new TwoLongs(start, end));
         if (v == null) {
             throw new JetException("Window not found: (" + start + ", " + end + ")");
         }
-        v.fire = fire;
-        v.purge = purge;
+        v.action = action;
     }
 
-    private static class TwoLongs {
-        final long start;
-        final long end;
-
-        private TwoLongs(long start, long end) {
-            this.start = start;
-            this.end = end;
-        }
-
-        @Override
-        public boolean equals(Object o) {
-            if (this == o) {
-                return true;
-            }
-            if (o == null || getClass() != o.getClass()) {
-                return false;
-            }
-            TwoLongs twoLongs = (TwoLongs) o;
-            return start == twoLongs.start &&
-                    end == twoLongs.end;
-        }
-
-        @Override
-        public int hashCode() {
-            return Objects.hash(start, end);
-        }
-    }
-
-    private static class Value<T> {
-        boolean fire;
-        boolean purge;
-        T value;
-
-        public Value(T value) {
-            this.value = value;
-        }
+    @Nonnull @Override
+    public Iterator<Entry<TwoLongs, Value<A, S>>> iterator() {
+        return data.entrySet().iterator();
     }
 }

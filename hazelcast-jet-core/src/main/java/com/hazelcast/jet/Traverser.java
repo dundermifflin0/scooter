@@ -220,5 +220,4 @@ public interface Traverser<T> {
             }
         };
     }
-
 }

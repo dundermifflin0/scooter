@@ -16,9 +16,53 @@
 
 package com.hazelcast.jet.impl.processor.customwindow;
 
+import com.hazelcast.jet.impl.processor.customwindow.WindowSet.TwoLongs;
+import com.hazelcast.jet.impl.processor.customwindow.WindowSet.Value;
+
+import java.util.Map.Entry;
+import java.util.Objects;
 import java.util.function.Supplier;
 
-public interface WindowSet<T> {
-    T getOrCreate(long start, long end, Supplier<T> createFn);
-    void mark(long start, long end, boolean fire, boolean purge);
+public interface WindowSet<T, A, S> extends Iterable<Entry<TwoLongs, Value<A, S>>> {
+    S accumulate(T item, long start, long end, Supplier<S> state);
+    void mark(long start, long end, int action);
+
+    class TwoLongs {
+        final long start;
+        final long end;
+
+        TwoLongs(long start, long end) {
+            this.start = start;
+            this.end = end;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) {
+                return true;
+            }
+            if (o == null || getClass() != o.getClass()) {
+                return false;
+            }
+            TwoLongs twoLongs = (TwoLongs) o;
+            return start == twoLongs.start &&
+                    end == twoLongs.end;
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(start, end);
+        }
+    }
+
+    class Value<A, S> {
+        A accumulator;
+        S handlerState;
+        int action;
+
+        Value(A accumulator, S handlerState) {
+            this.accumulator = accumulator;
+            this.handlerState = handlerState;
+        }
+    }
 }
