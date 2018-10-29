@@ -34,6 +34,7 @@ import com.hazelcast.jet.impl.processor.customwindow2.WindowSet.Value;
 import com.hazelcast.util.Clock;
 
 import javax.annotation.Nonnull;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -53,7 +54,6 @@ import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
 import static com.hazelcast.jet.impl.util.Util.lazyIncrement;
 import static com.hazelcast.jet.impl.util.Util.logLateEvent;
 import static com.hazelcast.util.Preconditions.checkTrue;
-import static java.util.Collections.emptySet;
 
 /**
  * @param <IN>  input item type
@@ -79,7 +79,8 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
     private long currentWatermark = Long.MIN_VALUE;
     private ProcessingGuarantee processingGuarantee;
     private long minRestoredCurrentWatermark = Long.MAX_VALUE;
-    private TimersImpl timersImpl = new TimersImpl();
+    private ImmediateTimersImpl immediateTimersImpl = new ImmediateTimersImpl();
+    private LazyTimersImpl lazyTimersImpl = new LazyTimersImpl();
     private final AppendableTraverser<OUT> appendableTraverser = new AppendableTraverser<>(16);
     private Traverser<OUT> onTimerTraverser = Traversers.empty();
 
@@ -133,10 +134,10 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
         WindowSet<IN, A, S> windowSet = windowSets.computeIfAbsent(key, k -> createWindowSetFn.get());
         for (WindowDef windowDef : windowDefs) {
             Value<A, S> windowData = windowSet.accumulate(windowDef, aggrOp, castedItem);
-            timersImpl.reset(key, windowDef, windowData);
+            immediateTimersImpl.reset(key, windowDef, windowData);
             TriggerAction triggerAction = trigger.onItem(castedItem, timestamp, windowDef, windowData.triggerState,
-                    timersImpl);
-            OUT out = handleTriggerAction(windowSet, triggerAction);
+                    immediateTimersImpl);
+            OUT out = handleTriggerAction(windowSet, triggerAction, immediateTimersImpl);
             if (out != null) {
                 appendableTraverser.append(out);
             }
@@ -170,20 +171,24 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
                                  try {
                                      WindowSet<IN, A, S> windowSet = windowSets.get(keyAndWindow.f0());
                                      Value<A, S> windowData = windowSet.getWindowData(keyAndWindow.f1());
-                                     timersImpl.reset(keyAndWindow.f0(), keyAndWindow.f1(), windowData);
+                                     lazyTimersImpl.reset(keyAndWindow.f0(), keyAndWindow.f1(), windowData);
                                      TriggerAction action = trigger.onEventTime(entry.getKey(), keyAndWindow.f1(),
-                                             windowData.triggerState, timersImpl);
-                                     return handleTriggerAction(windowSet, action);
+                                             windowData.triggerState, lazyTimersImpl);
+                                     return handleTriggerAction(windowSet, action, lazyTimersImpl);
                                  } catch (Exception e) {
                                      throw sneakyThrow(e);
                                  }
                              })))
-        .onFirstNull(timersToExecute::clear);
+        .onFirstNull(() -> {
+            timersToExecute.clear();
+            lazyTimersImpl.applyLazyTimers();
+        });
 
         return emitFromTraverser(onTimerTraverser);
     }
 
-    private OUT handleTriggerAction(WindowSet<IN, A, S> windowSet, TriggerAction triggerAction) {
+    private OUT handleTriggerAction(WindowSet<IN, A, S> windowSet, TriggerAction triggerAction,
+                                    TimersExt timersImpl) {
         OUT out = null;
         if (triggerAction.fire) {
             R winResult = triggerAction.purge
@@ -192,14 +197,28 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
             out = mapToOutputFn.apply(timersImpl.windowDef.start, timersImpl.windowDef.end, timersImpl.key, winResult);
         }
         if (triggerAction.purge) {
-            timersImpl.unschedule(eventTimers, timersImpl.windowData.eventTimerTime);
-            timersImpl.unschedule(systemTimers, timersImpl.windowData.systemTimerTime);
+            timersImpl.removeEventTimeTimer(timersImpl.windowData.eventTimerTime);
+            timersImpl.removeSystemTimeTimer(timersImpl.windowData.systemTimerTime);
             windowSet.remove(timersImpl.windowDef);
             if (windowSet.isEmpty()) {
                 windowSets.remove(timersImpl.key);
             }
         }
         return out;
+    }
+
+    private void unscheduleTimer(SortedMap<Long, Set<Tuple2<K, WindowDef>>> timers, K key, WindowDef windowDef,
+                                 long time) {
+        if (time != Long.MIN_VALUE) {
+            Set<Tuple2<K, WindowDef>> timersForTime = timers.get(time);
+            if (timersForTime != null) {
+                if (timersForTime.size() == 1) {
+                    timers.remove(time);
+                } else {
+                    timersForTime.remove(tuple2(key, windowDef));
+                }
+            }
+        }
     }
 
     public static class WindowDef {
@@ -243,44 +262,118 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
         }
     }
 
-    private class TimersImpl implements Timers {
+    private abstract class TimersExt implements Timers {
+        K key;
+        WindowDef windowDef;
+        Value<A, S> windowData;
 
-        private K key;
-        private WindowDef windowDef;
-        private Value<A, S> windowData;
-
-        private void reset(K key, WindowDef windowDef, Value<A, S> windowData) {
+        void reset(K key, WindowDef windowDef, Value<A, S> windowData) {
             this.key = key;
             this.windowDef = windowDef;
             this.windowData = windowData;
         }
 
+        abstract void removeEventTimeTimer(long time);
+        abstract void removeSystemTimeTimer(long time);
+    }
+
+    private class ImmediateTimersImpl extends TimersExt {
         @Override
         public void scheduleEventTimeTimer(long time) {
-            schedule(windowData.eventTimerTime, time, eventTimers);
+            schedule(windowData.eventTimerTime, time, key, windowDef, eventTimers);
             windowData.eventTimerTime = time;
         }
 
         @Override
         public void scheduleSystemTimeTimer(long time) {
-            schedule(windowData.systemTimerTime, time, systemTimers);
+            schedule(windowData.systemTimerTime, time, key, windowDef, systemTimers);
             windowData.systemTimerTime = time;
         }
 
-        private void schedule(long oldTime, long newTime, SortedMap<Long, Set<Tuple2<K, WindowDef>>> timers) {
+        @Override
+        void removeEventTimeTimer(long time) {
+            unscheduleTimer(eventTimers, key, windowDef, time);
+        }
+
+        @Override
+        void removeSystemTimeTimer(long time) {
+            unscheduleTimer(systemTimers, key, windowDef, time);
+        }
+
+        private void schedule(long oldTime, long newTime, K key, WindowDef windowDef,
+                              SortedMap<Long, Set<Tuple2<K, WindowDef>>> timers) {
             if (newTime == Long.MIN_VALUE) {
-                throw new IllegalArgumentException("Cannot schedule for MIN_VALUE");
+                throw new IllegalArgumentException("Cannot schedule timer for MIN_VALUE");
             }
-            unschedule(timers, oldTime);
+            unscheduleTimer(timers, key, windowDef, oldTime);
             timers.computeIfAbsent(newTime, x -> new HashSet<>())
                             .add(tuple2(key, windowDef));
         }
+    }
 
-        private void unschedule(SortedMap<Long, Set<Tuple2<K, WindowDef>>> timers, long time) {
-            if (time != Long.MIN_VALUE) {
-                timers.getOrDefault(time, emptySet())
-                   .remove(tuple2(key, windowDef));
+    private class LazyTimersImpl extends TimersExt {
+        private List<LazyTimer<K>> lazyEventTimers = new ArrayList<>();
+        private List<LazyTimer<K>> lazySystemTimers = new ArrayList<>();
+
+        @Override
+        public void scheduleEventTimeTimer(long time) {
+            lazyEventTimers.add(new LazyTimer(key, windowDef, windowData.eventTimerTime, time));
+        }
+
+        @Override
+        public void scheduleSystemTimeTimer(long time) {
+            lazySystemTimers.add(new LazyTimer(key, windowDef, windowData.systemTimerTime, time));
+        }
+
+        @Override
+        void removeEventTimeTimer(long time) {
+            unscheduleLazy(lazyEventTimers, time);
+        }
+
+        @Override
+        void removeSystemTimeTimer(long time) {
+            unscheduleLazy(lazySystemTimers, time);
+        }
+
+        private void applyLazyTimers() {
+            for (LazyTimer<K> t : lazyEventTimers) {
+                scheduleLazy(t.oldTime, t.newTime, t.key, t.windowDef, eventTimers);
             }
+            for (LazyTimer<K> t : lazySystemTimers) {
+                scheduleLazy(t.oldTime, t.newTime, t.key, t.windowDef, systemTimers);
+            }
+            lazyEventTimers.clear();
+            lazySystemTimers.clear();
+        }
+
+        private void unscheduleLazy(List<LazyTimer<K>> timers, long time) {
+            if (time != Long.MIN_VALUE) {
+                timers.add(new LazyTimer<>(key, windowDef, time, Long.MIN_VALUE));
+            }
+        }
+
+        private void scheduleLazy(long oldTime, long newTime, K key, WindowDef windowDef,
+                                  SortedMap<Long, Set<Tuple2<K, WindowDef>>> timers) {
+            if (newTime == Long.MIN_VALUE) {
+                return;
+            }
+            unscheduleTimer(timers, key, windowDef, oldTime);
+            timers.computeIfAbsent(newTime, x -> new HashSet<>())
+                            .add(tuple2(key, windowDef));
+        }
+    }
+
+    private static final class LazyTimer<K> {
+        final K key;
+        final WindowDef windowDef;
+        final long oldTime;
+        final long newTime;
+
+        private LazyTimer(K key, WindowDef windowDef, long oldTime, long newTime) {
+            this.key = key;
+            this.windowDef = windowDef;
+            this.oldTime = oldTime;
+            this.newTime = newTime;
         }
     }
 }

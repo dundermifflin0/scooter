@@ -67,6 +67,10 @@ public interface Trigger<IN, S> extends Serializable {
          */
         void scheduleEventTimeTimer(long time);
 
+        /**
+         * Note that after restoring from snapshot the timer will be restored
+         * for the same instant, which can be long in the past.
+         */
         void scheduleSystemTimeTimer(long time);
     }
 }

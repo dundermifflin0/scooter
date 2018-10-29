@@ -17,9 +17,11 @@
 package com.hazelcast.jet.impl.processor.customwindow2;
 
 import com.hazelcast.jet.accumulator.LongAccumulator;
+import com.hazelcast.jet.core.Processor;
 import com.hazelcast.jet.core.test.TestSupport;
 import com.hazelcast.jet.datamodel.TimestampedEntry;
 import com.hazelcast.jet.function.DistributedBiFunction;
+import com.hazelcast.jet.function.DistributedSupplier;
 import com.hazelcast.jet.impl.processor.customwindow2.CustomWindowP.WindowDef;
 import com.hazelcast.util.MutableLong;
 import org.junit.Test;
@@ -35,7 +37,7 @@ public class CustomWindowPTest {
 
     @Test
     public void test() {
-        TestSupport.verifyProcessor(() -> processor(
+        DistributedSupplier<Processor> processor = () -> processor(
                 (item, ts) -> singletonList(new WindowDef(ts, ts + 1)),
                 new Trigger<Long, MutableLong>() {
                     @Override
@@ -48,16 +50,16 @@ public class CustomWindowPTest {
                     public TriggerAction onEventTime(long time, WindowDef window, MutableLong state, Timers timers) {
                         return TriggerAction.EMIT_AND_EVICT;
                     }
-                }
-        ))
-            .input(asList(
-                    1L,
-                    wm(3)
-            ))
-        .expectOutput(asList(
-                new TimestampedEntry(2, "key", 1L),
-                wm(3)
-        ));
+                });
+        TestSupport.verifyProcessor(processor)
+                   .input(asList(
+                           1L,
+                           wm(3)
+                   ))
+                   .expectOutput(asList(
+                           new TimestampedEntry(2, "key", 1L),
+                           wm(3)
+                   ));
     }
 
     private CustomWindowP<Long, String, LongAccumulator, Long, MutableLong, TimestampedEntry> processor(
