@@ -17,12 +17,14 @@
 package com.hazelcast.jet.impl.processor.customwindow2;
 
 import com.hazelcast.internal.metrics.Probe;
+import com.hazelcast.jet.JetException;
 import com.hazelcast.jet.Traverser;
 import com.hazelcast.jet.Traversers;
 import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.config.ProcessingGuarantee;
 import com.hazelcast.jet.core.AbstractProcessor;
 import com.hazelcast.jet.core.AppendableTraverser;
+import com.hazelcast.jet.core.BroadcastKey;
 import com.hazelcast.jet.core.Watermark;
 import com.hazelcast.jet.datamodel.Tuple2;
 import com.hazelcast.jet.function.DistributedBiFunction;
@@ -34,12 +36,14 @@ import com.hazelcast.jet.impl.processor.customwindow2.WindowSet.Value;
 import com.hazelcast.util.Clock;
 
 import javax.annotation.Nonnull;
+import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Set;
 import java.util.SortedMap;
@@ -49,8 +53,12 @@ import java.util.function.Function;
 import java.util.function.ToLongFunction;
 
 import static com.hazelcast.jet.Traversers.traverseStream;
+import static com.hazelcast.jet.Util.entry;
+import static com.hazelcast.jet.config.ProcessingGuarantee.EXACTLY_ONCE;
+import static com.hazelcast.jet.core.BroadcastKey.broadcastKey;
 import static com.hazelcast.jet.datamodel.Tuple2.tuple2;
 import static com.hazelcast.jet.impl.util.ExceptionUtil.sneakyThrow;
+import static com.hazelcast.jet.impl.util.LoggingUtil.logFine;
 import static com.hazelcast.jet.impl.util.Util.lazyIncrement;
 import static com.hazelcast.jet.impl.util.Util.logLateEvent;
 import static com.hazelcast.util.Preconditions.checkTrue;
@@ -83,6 +91,7 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
     private LazyTimersImpl lazyTimersImpl = new LazyTimersImpl();
     private final AppendableTraverser<OUT> appendableTraverser = new AppendableTraverser<>(16);
     private Traverser<OUT> onTimerTraverser = Traversers.empty();
+    private Traverser snapshotTraverser;
 
     @Probe
     private AtomicLong lateEventsDropped = new AtomicLong();
@@ -160,6 +169,57 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
         return handleTimers(systemTimers, Clock.currentTimeMillis());
     }
 
+    @Override
+    public boolean saveToSnapshot() {
+        if (snapshotTraverser == null) {
+            snapshotTraverser = Traversers.<Object>traverseIterable(windowSets.entrySet())
+                    .append(entry(broadcastKey(Keys.CURRENT_WATERMARK), currentWatermark))
+                    .onFirstNull(() -> snapshotTraverser = null);
+        }
+        return emitFromTraverserToSnapshot(snapshotTraverser);
+    }
+
+    @Override
+    protected void restoreFromSnapshot(@Nonnull Object key, @Nonnull Object value) {
+        if (key instanceof BroadcastKey) {
+            BroadcastKey bcastKey = (BroadcastKey) key;
+            if (!Keys.CURRENT_WATERMARK.equals(bcastKey.key())) {
+                throw new JetException("Unexpected broadcast key: " + bcastKey.key());
+            }
+            long newCurrentWatermark = (long) value;
+            assert processingGuarantee != EXACTLY_ONCE
+                    || minRestoredCurrentWatermark == Long.MAX_VALUE
+                    || minRestoredCurrentWatermark == newCurrentWatermark
+                    : "different values for currentWatermark restored, before=" + minRestoredCurrentWatermark
+                    + ", new=" + newCurrentWatermark;
+            minRestoredCurrentWatermark = Math.min(newCurrentWatermark, minRestoredCurrentWatermark);
+            return;
+        }
+
+        WindowSet<IN, A, S> value1 = (WindowSet<IN, A, S>) value;
+        if (windowSets.put((K) key, value1) != null) {
+            throw new JetException("Duplicate key in snapshot: " + key);
+        }
+        for (Entry<WindowDef, Value<A, S>> window : value1) {
+            if (window.getValue().eventTimerTime != Long.MIN_VALUE) {
+                eventTimers.computeIfAbsent(window.getValue().eventTimerTime, x -> new HashSet<>())
+                      .add(tuple2((K) key, window.getKey()));
+            }
+            if (window.getValue().systemTimerTime != Long.MIN_VALUE) {
+                systemTimers.computeIfAbsent(window.getValue().systemTimerTime, x -> new HashSet<>())
+                      .add(tuple2((K) key, window.getKey()));
+            }
+        }
+    }
+
+    @Override
+    public boolean finishSnapshotRestore() {
+        currentWatermark = minRestoredCurrentWatermark;
+        totalKeys.set(windowSets.size());
+        logFine(getLogger(), "Restored currentWatermark from snapshot to: %s", currentWatermark);
+        return true;
+    }
+
     private boolean handleTimers(SortedMap<Long, Set<Tuple2<K, WindowDef>>> timers, long time) {
         if (!emitFromTraverser(onTimerTraverser)) {
             return false;
@@ -221,7 +281,8 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
         }
     }
 
-    public static class WindowDef {
+    // TODO [viliam] better serialization
+    public static class WindowDef implements Serializable {
         private final long start;
         private final long end;
 
@@ -375,5 +436,10 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
             this.oldTime = oldTime;
             this.newTime = newTime;
         }
+    }
+
+    // package-visible for test
+    enum Keys {
+        CURRENT_WATERMARK
     }
 }

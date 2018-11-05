@@ -16,10 +16,13 @@
 
 package com.hazelcast.jet.accumulator;
 
+import java.io.Serializable;
+
 /**
  * Mutable container of a {@code long} value.
  */
-public class LongAccumulator {
+// TODO [viliam] remove serialization
+public class LongAccumulator implements Serializable {
 
     private long value;
 

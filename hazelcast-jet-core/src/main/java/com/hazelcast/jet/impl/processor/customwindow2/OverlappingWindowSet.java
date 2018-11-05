@@ -20,12 +20,14 @@ import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.impl.processor.customwindow2.CustomWindowP.WindowDef;
 
 import javax.annotation.Nonnull;
+import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.Map.Entry;
 
-class OverlappingWindowSet<T, A, S> implements WindowSet<T,A,S> {
+// TODO [viliam] custom serialization
+class OverlappingWindowSet<T, A, S> implements WindowSet<T, A, S>, Serializable {
 
     private final Map<WindowDef, Value<A, S>> windows = new HashMap<>();
 

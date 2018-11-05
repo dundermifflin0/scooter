@@ -17,9 +17,10 @@
 package com.hazelcast.jet.impl.processor.customwindow2;
 
 import com.hazelcast.jet.aggregate.AggregateOperation1;
-import com.hazelcast.jet.impl.processor.customwindow2.WindowSet.Value;
 import com.hazelcast.jet.impl.processor.customwindow2.CustomWindowP.WindowDef;
+import com.hazelcast.jet.impl.processor.customwindow2.WindowSet.Value;
 
+import java.io.Serializable;
 import java.util.Map.Entry;
 
 public interface WindowSet<T, A, S> extends Iterable<Entry<WindowDef, Value<A, S>>> {
@@ -30,7 +31,8 @@ public interface WindowSet<T, A, S> extends Iterable<Entry<WindowDef, Value<A, S
     boolean isEmpty();
 
     /** Private API */
-    class Value<A, S> {
+    // TODO [viliam] better serialization
+    class Value<A, S> implements Serializable {
         A accumulator;
         S triggerState;
         long eventTimerTime = Long.MIN_VALUE;
