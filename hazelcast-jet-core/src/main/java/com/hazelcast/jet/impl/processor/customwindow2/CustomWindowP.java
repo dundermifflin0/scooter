@@ -33,7 +33,6 @@ import com.hazelcast.jet.function.KeyedWindowResultFunction;
 import com.hazelcast.jet.impl.processor.customwindow2.Trigger.Timers;
 import com.hazelcast.jet.impl.processor.customwindow2.Trigger.TriggerAction;
 import com.hazelcast.jet.impl.processor.customwindow2.WindowSet.Value;
-import com.hazelcast.util.Clock;
 
 import javax.annotation.Nonnull;
 import java.io.Serializable;
@@ -50,6 +49,7 @@ import java.util.SortedMap;
 import java.util.TreeMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import java.util.function.ToLongFunction;
 
 import static com.hazelcast.jet.Traversers.traverseStream;
@@ -80,10 +80,11 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
     private final DistributedBiFunction<IN, Long, Collection<WindowDef>> windowFn;
     private final Trigger<IN, S> trigger;
     private final KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn;
+    private final LongSupplier clock;
 
     private final Map<K, WindowSet<IN, A, S>> windowSets = new HashMap<>();
-    private final SortedMap<Long, Set<Tuple2<K, WindowDef>>> eventTimers = new TreeMap<>();
-    private final SortedMap<Long, Set<Tuple2<K, WindowDef>>> systemTimers = new TreeMap<>();
+    private final TreeMap<Long, Set<Tuple2<K, WindowDef>>> eventTimers = new TreeMap<>();
+    private final TreeMap<Long, Set<Tuple2<K, WindowDef>>> systemTimers = new TreeMap<>();
     private long currentWatermark = Long.MIN_VALUE;
     private ProcessingGuarantee processingGuarantee;
     private long minRestoredCurrentWatermark = Long.MAX_VALUE;
@@ -107,7 +108,8 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
             @Nonnull DistributedSupplier<WindowSet> createWindowSetFn,
             @Nonnull DistributedBiFunction<IN, Long, Collection<WindowDef>> windowFn,
             @Nonnull Trigger<IN, S> trigger,
-            @Nonnull KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn
+            @Nonnull KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn,
+            @Nonnull LongSupplier clock
     ) {
         checkTrue(keyFns.size() == aggrOp.arity(), keyFns.size() + " key functions " +
                 "provided for " + aggrOp.arity() + "-arity aggregate operation");
@@ -118,6 +120,7 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
         this.windowFn = windowFn;
         this.trigger = trigger;
         this.mapToOutputFn = mapToOutputFn;
+        this.clock = clock;
     }
 
     @Override
@@ -157,7 +160,8 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
 
     @Override
     public boolean tryProcessWatermark(@Nonnull Watermark wm) {
-        boolean res = handleTimers(eventTimers, wm.timestamp());
+        // TODO [viliam] extract method ref to reduce GC litter
+        boolean res = handleTimers(eventTimers, wm.timestamp(), trigger::onEventTime);
         if (res) {
             // TODO purge windows even if triggers didn't say so
         }
@@ -166,7 +170,8 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
 
     @Override
     public boolean tryProcess() {
-        return handleTimers(systemTimers, Clock.currentTimeMillis());
+        // TODO [viliam] extract method ref to reduce GC litter
+        return handleTimers(systemTimers, clock.getAsLong(), trigger::onSystemTime);
     }
 
     @Override
@@ -220,11 +225,12 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
         return true;
     }
 
-    private boolean handleTimers(SortedMap<Long, Set<Tuple2<K, WindowDef>>> timers, long time) {
+    private boolean handleTimers(TreeMap<Long, Set<Tuple2<K, WindowDef>>> timers, long time,
+                                 TriggerHandler<S> triggerHandler) {
         if (!emitFromTraverser(onTimerTraverser)) {
             return false;
         }
-        SortedMap<Long, Set<Tuple2<K, WindowDef>>> timersToExecute = timers.headMap(time);
+        SortedMap<Long, Set<Tuple2<K, WindowDef>>> timersToExecute = timers.headMap(time, true);
         onTimerTraverser = traverseStream(timersToExecute.entrySet().stream()
                 .flatMap(entry -> entry.getValue().stream()
                              .map(keyAndWindow -> {
@@ -232,7 +238,7 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
                                      WindowSet<IN, A, S> windowSet = windowSets.get(keyAndWindow.f0());
                                      Value<A, S> windowData = windowSet.getWindowData(keyAndWindow.f1());
                                      lazyTimersImpl.reset(keyAndWindow.f0(), keyAndWindow.f1(), windowData);
-                                     TriggerAction action = trigger.onEventTime(entry.getKey(), keyAndWindow.f1(),
+                                     TriggerAction action = triggerHandler.onTimer(entry.getKey(), keyAndWindow.f1(),
                                              windowData.triggerState, lazyTimersImpl);
                                      return handleTriggerAction(windowSet, action, lazyTimersImpl);
                                  } catch (Exception e) {
@@ -441,5 +447,9 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
     // package-visible for test
     enum Keys {
         CURRENT_WATERMARK
+    }
+
+    private interface TriggerHandler<S> {
+        TriggerAction onTimer(long time, WindowDef window, S state, Timers timers) throws Exception;
     }
 }

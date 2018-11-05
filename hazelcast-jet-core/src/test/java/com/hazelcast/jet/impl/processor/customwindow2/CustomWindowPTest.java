@@ -18,6 +18,8 @@ package com.hazelcast.jet.impl.processor.customwindow2;
 
 import com.hazelcast.jet.accumulator.LongAccumulator;
 import com.hazelcast.jet.core.Processor;
+import com.hazelcast.jet.core.test.TestOutbox;
+import com.hazelcast.jet.core.test.TestProcessorContext;
 import com.hazelcast.jet.core.test.TestSupport;
 import com.hazelcast.jet.datamodel.TimestampedEntry;
 import com.hazelcast.jet.function.DistributedBiFunction;
@@ -32,34 +34,54 @@ import static com.hazelcast.jet.aggregate.AggregateOperations.counting;
 import static com.hazelcast.jet.core.TestUtil.wm;
 import static java.util.Arrays.asList;
 import static java.util.Collections.singletonList;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 public class CustomWindowPTest {
 
+    private final LongAccumulator clock = new LongAccumulator();
+
     @Test
-    public void test() {
+    public void test_eventTimer() {
         DistributedSupplier<Processor> processor = () -> processor(
+                (item, ts) -> singletonList(new WindowDef(ts, ts + 1)),
+                new Trigger<Long, MutableLong>() { });
+        TestSupport.verifyProcessor(processor)
+                   .input(asList(
+                           1L,
+                           wm(2)
+                   ))
+                   .expectOutput(asList(
+                           new TimestampedEntry(2, "key", 1L),
+                           wm(2)
+                   ));
+    }
+
+    @Test
+    public void test_systemTimer() throws Exception {
+        CustomWindowP processor = processor(
                 (item, ts) -> singletonList(new WindowDef(ts, ts + 1)),
                 new Trigger<Long, MutableLong>() {
                     @Override
                     public TriggerAction onItem(Long item, long timestamp, WindowDef window, MutableLong state, Timers timers) {
-                        timers.scheduleEventTimeTimer(window.end());
+                        timers.scheduleSystemTimeTimer(clock.get() + 10);
                         return TriggerAction.NO_ACTION;
                     }
 
                     @Override
-                    public TriggerAction onEventTime(long time, WindowDef window, MutableLong state, Timers timers) {
+                    public TriggerAction onSystemTime(long time, WindowDef window, MutableLong state, Timers timers) {
                         return TriggerAction.EMIT_AND_EVICT;
                     }
                 });
-        TestSupport.verifyProcessor(processor)
-                   .input(asList(
-                           1L,
-                           wm(3)
-                   ))
-                   .expectOutput(asList(
-                           new TimestampedEntry(2, "key", 1L),
-                           wm(3)
-                   ));
+
+        TestOutbox outbox = new TestOutbox(1024);
+        processor.init(outbox, new TestProcessorContext());
+        processor.tryProcess(0, 1L);
+        processor.tryProcess();
+        assertTrue(outbox.queue(0).isEmpty());
+        clock.add(10);
+        processor.tryProcess();
+        assertEquals(1, outbox.queue(0).size());
     }
 
     private CustomWindowP<Long, String, LongAccumulator, Long, MutableLong, TimestampedEntry> processor(
@@ -73,7 +95,8 @@ public class CustomWindowPTest {
                 OverlappingWindowSet::new,
                 windowFn,
                 trigger,
-                TimestampedEntry::fromWindowResult
+                TimestampedEntry::fromWindowResult,
+                clock::get
         );
     }
 }

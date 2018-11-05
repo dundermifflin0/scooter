@@ -49,13 +49,40 @@ public interface Trigger<IN, S> extends Serializable {
         return null;
     }
 
-    TriggerAction onItem(IN item, long timestamp, WindowDef window, S state, Timers timers) throws Exception;
-
-    default TriggerAction onEventTime(long time, WindowDef window, S state, Timers timers) throws Exception {
+    /**
+     * Method will be called for each item+window when the item is received.
+     * <p>
+     * Default implementation schedules event time timer for the end of the
+     * window.
+      */
+    default TriggerAction onItem(IN item, long timestamp, WindowDef window, S state, Timers timers) throws Exception {
+        timers.scheduleEventTimeTimer(window.end());
         return TriggerAction.NO_ACTION;
     }
 
-    default TriggerAction onProcessingTime(long time, WindowDef window, S state, Timers timers) throws Exception {
+    /**
+     * Method will be called to handle event time timer.
+     *
+     * @param time   The time the timer was scheduled to
+     * @param window The window definition for the event
+     * @param state The trigger state for this window+key tuple (as created by
+     *          {@link #createState()}
+     * @param timers Callbacks to schedule new timers
+     */
+    default TriggerAction onEventTime(long time, WindowDef window, S state, Timers timers) throws Exception {
+        return TriggerAction.EMIT_AND_EVICT;
+    }
+
+    /**
+     * Method will be called to handle system time timer.
+     *
+     * @param time   The time the timer was scheduled to
+     * @param window The window definition for the event
+     * @param state The trigger state for this window+key tuple (as created by
+     *          {@link #createState()}
+     * @param timers Callbacks to schedule new timers
+     */
+    default TriggerAction onSystemTime(long time, WindowDef window, S state, Timers timers) throws Exception {
         return TriggerAction.NO_ACTION;
     }
 
