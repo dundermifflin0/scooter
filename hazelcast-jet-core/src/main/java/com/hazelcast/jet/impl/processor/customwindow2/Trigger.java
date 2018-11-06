@@ -50,6 +50,18 @@ public interface Trigger<IN, S> extends Serializable {
     }
 
     /**
+     * Merge {@code otherState} into {@code state}.
+     * @param state State to merged to
+     * @param otherState State to be merged
+     */
+    default void mergeState(S state, S otherState) {
+        if (otherState == null) {
+            return;
+        }
+        throw new UnsupportedOperationException("Trigger.mergeState() must be implemented for merging window set");
+    }
+
+    /**
      * Method will be called for each item+window when the item is received.
      * <p>
      * Default implementation schedules event time timer for the end of the

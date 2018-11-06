@@ -16,19 +16,32 @@
 
 package com.hazelcast.jet.impl.processor.customwindow2;
 
-import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.impl.processor.customwindow2.CustomWindowP.WindowDef;
 import com.hazelcast.jet.impl.processor.customwindow2.WindowSet.Value;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.Serializable;
 import java.util.Map.Entry;
 
-public interface WindowSet<T, A, S> extends Iterable<Entry<WindowDef, Value<A, S>>> {
-    Value<A, S> accumulate(WindowDef windowDef, AggregateOperation1<T, A, ?> aggrOp, T item);
+public interface WindowSet<K, A, S> extends Iterable<Entry<WindowDef, Value<A, S>>> {
+    /**
+     * Add the given {@code window} to the window set. Returns a new WindowDef
+     * containing the window, which might be the result of windows merging.
+     *
+     * @param windowSetCallback a callback to merge window in 2nd argument into
+     *                     window in the 1st argument
+     */
+    @Nonnull
+    WindowDef mergeWindow(@Nonnull K key,
+                          @Nonnull WindowDef window,
+                          @Nonnull WindowSetCallback<K, A, S> windowSetCallback);
 
-    void remove(WindowDef windowDef);
+    void remove(@Nonnull WindowDef windowDef);
 
     boolean isEmpty();
+
+    int size();
 
     /** Private API */
     // TODO [viliam] better serialization
@@ -37,12 +50,14 @@ public interface WindowSet<T, A, S> extends Iterable<Entry<WindowDef, Value<A, S
         S triggerState;
         long eventTimerTime = Long.MIN_VALUE;
         long systemTimerTime = Long.MIN_VALUE;
-
-        Value(A accumulator) {
-            this.accumulator = accumulator;
-        }
     }
 
     /** Private API */
-    Value<A, S> getWindowData(WindowDef windowDef);
+    @Nullable
+    Value<A, S> get(@Nonnull WindowDef windowDef);
+
+    interface WindowSetCallback<K, A, S> {
+        void merge(Value<A, S> mergeTarget, Value<A, S> mergeSource);
+        void remove(K key, Value<A, S> value, WindowDef sourceWindow);
+    }
 }

@@ -16,10 +16,10 @@
 
 package com.hazelcast.jet.impl.processor.customwindow2;
 
-import com.hazelcast.jet.aggregate.AggregateOperation1;
 import com.hazelcast.jet.impl.processor.customwindow2.CustomWindowP.WindowDef;
 
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
 import java.io.Serializable;
 import java.util.HashMap;
 import java.util.Iterator;
@@ -27,23 +27,29 @@ import java.util.Map;
 import java.util.Map.Entry;
 
 // TODO [viliam] custom serialization
-class OverlappingWindowSet<T, A, S> implements WindowSet<T, A, S>, Serializable {
+class OverlappingWindowSet<K, A, S> implements WindowSet<K, A, S>, Serializable {
 
     private final Map<WindowDef, Value<A, S>> windows = new HashMap<>();
 
     OverlappingWindowSet() {
     }
 
+    @Nonnull @Override
+    public WindowDef mergeWindow(@Nonnull K key,
+                                 @Nonnull WindowDef window,
+                                 @Nonnull WindowSetCallback<K, A, S> windowSetCallback) {
+        windows.computeIfAbsent(window, k -> new Value<>());
+        return window;
+    }
+
+    @Nullable
     @Override
-    public Value<A, S> accumulate(WindowDef windowDef, AggregateOperation1<T, A, ?> aggrOp, T item) {
-        Value<A, S> value =
-                windows.computeIfAbsent(windowDef, k -> new Value(aggrOp.createFn().get()));
-        aggrOp.accumulateFn().accept(value.accumulator, item);
-        return value;
+    public Value<A, S> get(@Nonnull WindowDef windowDef) {
+        return windows.get(windowDef);
     }
 
     @Override
-    public void remove(WindowDef windowDef) {
+    public void remove(@Nonnull WindowDef windowDef) {
         windows.remove(windowDef);
     }
 
@@ -53,8 +59,8 @@ class OverlappingWindowSet<T, A, S> implements WindowSet<T, A, S>, Serializable 
     }
 
     @Override
-    public Value<A, S> getWindowData(WindowDef windowDef) {
-        return windows.get(windowDef);
+    public int size() {
+        return windows.size();
     }
 
     @Nonnull @Override

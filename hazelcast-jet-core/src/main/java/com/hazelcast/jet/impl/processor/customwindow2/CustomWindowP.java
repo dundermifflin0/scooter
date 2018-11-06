@@ -33,6 +33,7 @@ import com.hazelcast.jet.function.KeyedWindowResultFunction;
 import com.hazelcast.jet.impl.processor.customwindow2.Trigger.Timers;
 import com.hazelcast.jet.impl.processor.customwindow2.Trigger.TriggerAction;
 import com.hazelcast.jet.impl.processor.customwindow2.WindowSet.Value;
+import com.hazelcast.jet.impl.processor.customwindow2.WindowSet.WindowSetCallback;
 
 import javax.annotation.Nonnull;
 import java.io.Serializable;
@@ -72,6 +73,11 @@ import static com.hazelcast.util.Preconditions.checkTrue;
  * @param <OUT> output item type
  */
 public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
+    private static final Watermark COMPLETING_WM = new Watermark(Long.MAX_VALUE);
+
+    final Map<K, WindowSet<K, A, S>> windowSets = new HashMap<>();
+    final TreeMap<Long, Set<Tuple2<K, WindowDef>>> eventTimers = new TreeMap<>();
+    final TreeMap<Long, Set<Tuple2<K, WindowDef>>> systemTimers = new TreeMap<>();
 
     private final List<ToLongFunction<Object>> timestampFns;
     private final List<Function<Object, K>> keyFns;
@@ -82,9 +88,6 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
     private final KeyedWindowResultFunction<? super K, ? super R, OUT> mapToOutputFn;
     private final LongSupplier clock;
 
-    private final Map<K, WindowSet<IN, A, S>> windowSets = new HashMap<>();
-    private final TreeMap<Long, Set<Tuple2<K, WindowDef>>> eventTimers = new TreeMap<>();
-    private final TreeMap<Long, Set<Tuple2<K, WindowDef>>> systemTimers = new TreeMap<>();
     private long currentWatermark = Long.MIN_VALUE;
     private ProcessingGuarantee processingGuarantee;
     private long minRestoredCurrentWatermark = Long.MAX_VALUE;
@@ -100,6 +103,28 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
     private AtomicLong totalKeys = new AtomicLong();
     @Probe
     private AtomicLong totalWindows = new AtomicLong();
+    private WindowSetCallback<K, A, S> windowSetCallback = new WindowSetCallback<K, A, S>() {
+        @Override
+        public void merge(Value<A, S> target, Value<A, S> source) {
+            aggrOp.combineFn().accept(target.accumulator, source.accumulator);
+            trigger.mergeState(target.triggerState, source.triggerState);
+        }
+
+        @Override
+        public void remove(K key, Value<A, S> value, WindowDef window) {
+            // remove timers
+            if (value.eventTimerTime != Long.MIN_VALUE) {
+                boolean success = eventTimers.get(value.eventTimerTime).remove(tuple2(key, window));
+                windowSets.get(key).get(window).eventTimerTime = Long.MIN_VALUE;
+                assert success : "Failed to remove event timer";
+            }
+            if (value.systemTimerTime != Long.MIN_VALUE) {
+                boolean success = systemTimers.get(value.systemTimerTime).remove(tuple2(key, window));
+                windowSets.get(key).get(window).systemTimerTime = Long.MIN_VALUE;
+                assert success : "Failed to remove system timer";
+            }
+        }
+    };
 
     public CustomWindowP(
             @Nonnull List<? extends ToLongFunction<?>> timestampFns,
@@ -143,9 +168,15 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
         K key = keyFns.get(ordinal).apply(item);
         IN castedItem = (IN) item;
         Collection<WindowDef> windowDefs = windowFn.apply(castedItem, timestamp);
-        WindowSet<IN, A, S> windowSet = windowSets.computeIfAbsent(key, k -> createWindowSetFn.get());
+        WindowSet<K, A, S> windowSet = windowSets.computeIfAbsent(key, k -> createWindowSetFn.get());
         for (WindowDef windowDef : windowDefs) {
-            Value<A, S> windowData = windowSet.accumulate(windowDef, aggrOp, castedItem);
+            windowDef = windowSet.mergeWindow(key, windowDef, windowSetCallback);
+            Value<A, S> windowData = windowSet.get(windowDef);
+            assert windowData != null : "null windowData";
+            if (windowData.accumulator == null) {
+                windowData.accumulator = aggrOp.createFn().get();
+            }
+            aggrOp.accumulateFn().accept(windowData.accumulator, castedItem);
             immediateTimersImpl.reset(key, windowDef, windowData);
             TriggerAction triggerAction = trigger.onItem(castedItem, timestamp, windowDef, windowData.triggerState,
                     immediateTimersImpl);
@@ -161,11 +192,8 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
     @Override
     public boolean tryProcessWatermark(@Nonnull Watermark wm) {
         // TODO [viliam] extract method ref to reduce GC litter
-        boolean res = handleTimers(eventTimers, wm.timestamp(), trigger::onEventTime);
-        if (res) {
-            // TODO purge windows even if triggers didn't say so
-        }
-        return res;
+        currentWatermark = wm.timestamp();
+        return handleTimers(eventTimers, wm.timestamp(), trigger::onEventTime);
     }
 
     @Override
@@ -175,7 +203,15 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
     }
 
     @Override
+    public boolean complete() {
+        return tryProcessWatermark(COMPLETING_WM);
+    }
+
+    @Override
     public boolean saveToSnapshot() {
+        if (!emitFromTraverser(onTimerTraverser)) {
+            return false;
+        }
         if (snapshotTraverser == null) {
             snapshotTraverser = Traversers.<Object>traverseIterable(windowSets.entrySet())
                     .append(entry(broadcastKey(Keys.CURRENT_WATERMARK), currentWatermark))
@@ -201,11 +237,11 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
             return;
         }
 
-        WindowSet<IN, A, S> value1 = (WindowSet<IN, A, S>) value;
-        if (windowSets.put((K) key, value1) != null) {
+        WindowSet<K, A, S> windowSet = (WindowSet<K, A, S>) value;
+        if (windowSets.put((K) key, windowSet) != null) {
             throw new JetException("Duplicate key in snapshot: " + key);
         }
-        for (Entry<WindowDef, Value<A, S>> window : value1) {
+        for (Entry<WindowDef, Value<A, S>> window : windowSet) {
             if (window.getValue().eventTimerTime != Long.MIN_VALUE) {
                 eventTimers.computeIfAbsent(window.getValue().eventTimerTime, x -> new HashSet<>())
                       .add(tuple2((K) key, window.getKey()));
@@ -230,13 +266,19 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
         if (!emitFromTraverser(onTimerTraverser)) {
             return false;
         }
+        getLogger().info("Handling timers for " + time + (timers == eventTimers ? "(event)" : "(system)"));
         SortedMap<Long, Set<Tuple2<K, WindowDef>>> timersToExecute = timers.headMap(time, true);
         onTimerTraverser = traverseStream(timersToExecute.entrySet().stream()
                 .flatMap(entry -> entry.getValue().stream()
                              .map(keyAndWindow -> {
                                  try {
-                                     WindowSet<IN, A, S> windowSet = windowSets.get(keyAndWindow.f0());
-                                     Value<A, S> windowData = windowSet.getWindowData(keyAndWindow.f1());
+                                     WindowSet<K, A, S> windowSet = windowSets.get(keyAndWindow.f0());
+                                     Value<A, S> windowData = windowSet.get(keyAndWindow.f1());
+                                     if (timers == eventTimers) {
+                                         windowData.eventTimerTime = Long.MIN_VALUE;
+                                     } else {
+                                         windowData.systemTimerTime = Long.MIN_VALUE;
+                                     }
                                      lazyTimersImpl.reset(keyAndWindow.f0(), keyAndWindow.f1(), windowData);
                                      TriggerAction action = triggerHandler.onTimer(entry.getKey(), keyAndWindow.f1(),
                                              windowData.triggerState, lazyTimersImpl);
@@ -253,7 +295,7 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
         return emitFromTraverser(onTimerTraverser);
     }
 
-    private OUT handleTriggerAction(WindowSet<IN, A, S> windowSet, TriggerAction triggerAction,
+    private OUT handleTriggerAction(WindowSet<K, A, S> windowSet, TriggerAction triggerAction,
                                     TimersExt timersImpl) {
         OUT out = null;
         if (triggerAction.fire) {
@@ -265,9 +307,10 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
         if (triggerAction.purge) {
             timersImpl.removeEventTimeTimer(timersImpl.windowData.eventTimerTime);
             timersImpl.removeSystemTimeTimer(timersImpl.windowData.systemTimerTime);
-            windowSet.remove(timersImpl.windowDef);
-            if (windowSet.isEmpty()) {
+            if (windowSet.size() == 1) {
                 windowSets.remove(timersImpl.key);
+            } else {
+                windowSet.remove(timersImpl.windowDef);
             }
         }
         return out;
@@ -276,13 +319,17 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
     private void unscheduleTimer(SortedMap<Long, Set<Tuple2<K, WindowDef>>> timers, K key, WindowDef windowDef,
                                  long time) {
         if (time != Long.MIN_VALUE) {
+            Value<A, S> windowData = windowSets.get(key).get(windowDef);
+            if (timers == eventTimers) {
+                windowData.eventTimerTime = Long.MIN_VALUE;
+            } else {
+                windowData.systemTimerTime = Long.MIN_VALUE;
+            }
             Set<Tuple2<K, WindowDef>> timersForTime = timers.get(time);
-            if (timersForTime != null) {
-                if (timersForTime.size() == 1) {
-                    timers.remove(time);
-                } else {
-                    timersForTime.remove(tuple2(key, windowDef));
-                }
+            if (timersForTime.size() == 1) {
+                timers.remove(time);
+            } else {
+                timersForTime.remove(tuple2(key, windowDef));
             }
         }
     }
