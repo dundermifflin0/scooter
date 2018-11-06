@@ -266,7 +266,6 @@ public class CustomWindowP<IN, K, A, R, S, OUT> extends AbstractProcessor {
         if (!emitFromTraverser(onTimerTraverser)) {
             return false;
         }
-        getLogger().info("Handling timers for " + time + (timers == eventTimers ? "(event)" : "(system)"));
         SortedMap<Long, Set<Tuple2<K, WindowDef>>> timersToExecute = timers.headMap(time, true);
         onTimerTraverser = traverseStream(timersToExecute.entrySet().stream()
                 .flatMap(entry -> entry.getValue().stream()

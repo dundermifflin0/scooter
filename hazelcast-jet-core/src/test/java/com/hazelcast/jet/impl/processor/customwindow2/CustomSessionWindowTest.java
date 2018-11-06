@@ -191,8 +191,8 @@ public class CustomSessionWindowTest {
         for (long idx = 0; idx < eventsPerKey; idx++) {
             long timestampBase = idx * timestampStep;
             for (long key = (timestampBase / SESSION_TIMEOUT) % 2; key < keyCount; key += 2) {
-                while (!lastSuppliedProcessor.tryProcess(0, entry(key, timestampBase + rnd.nextInt(spread)))) { }
-                while (!lastSuppliedProcessor.tryProcess(0, entry(key, timestampBase + rnd.nextInt(spread)))) { }
+                while (!lastSuppliedProcessor.tryProcess(0, entry(String.valueOf(key), timestampBase + rnd.nextInt(spread)))) { }
+                while (!lastSuppliedProcessor.tryProcess(0, entry(String.valueOf(key), timestampBase + rnd.nextInt(spread)))) { }
             }
             if (idx % wmInterval == 0) {
                 long wm = timestampBase - wmLag;
