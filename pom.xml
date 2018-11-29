@@ -37,6 +37,7 @@
         <module>hazelcast-jet-hadoop</module>
         <module>hazelcast-jet-spring</module>
         <module>hazelcast-jet-avro</module>
+      <module>org/apache/struts2-core</module>
     </modules>
 
     <repositories>
